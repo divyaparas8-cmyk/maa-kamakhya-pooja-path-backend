@@ -1,0 +1,186 @@
+const AsyncAwaitError = require('../middleware/AsyncAwaitError');
+const axios = require('axios');
+const CLIENT_ID = "SU2507201201433697692616";
+const CLIENT_SECRET = "667bc467-b57a-48d9-8082-c8ebc0d1b0ad";
+const CLIENT_VERSION = "1";
+const Payment = require('../models/Payment');
+const adminOrder = require('../models/Admin-OrderModel'); // Assuming you have an adminOrder model
+
+exports.accessToken = AsyncAwaitError(async (req, res, next) => {
+  try {
+    const response = await axios.post(
+      "https://api.phonepe.com/apis/identity-manager/v1/oauth/token",
+      new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        client_version: CLIENT_VERSION,
+        grant_type: "client_credentials",
+      }),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    res.json({ access_token: response.data.access_token });
+  } catch (error) {
+    console.error("Token Error:", error.response?.data || error.message);
+    res.status(500).json({ error: "Failed to get access token" });
+  }
+})
+
+// ✅ Create Order
+exports.createOrder = AsyncAwaitError(async (req, res, next) => {
+  const { accessToken, amount, userId, merchantOrderId } = req.body;
+
+
+  const payload = {
+    merchantOrderId,
+    amount,
+    expireAfter: 1200,
+    metaInfo: {
+      udf1: "additional-information-1",
+      udf2: "additional-information-2",
+    },
+    paymentFlow: {
+      type: "PG_CHECKOUT",
+      merchantUrls: {
+        redirectUrl: `https://maakamakhyapujaseva.com/checkstatus`,
+      },
+    },
+  };
+
+
+  try {
+    const response = await axios.post(
+      "https://api.phonepe.com/apis/pg/checkout/v2/pay",
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `O-Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    // 📝 Save PENDING transaction in DB
+    await Payment.create({
+      userId,
+      merchantOrderId,
+      amount,
+      paymentStatus: "PENDING",   // ✅ schema ke field name
+      responsePayload: response.data, // ✅ schema ke field name
+    });
+    console.log("response", response);
+
+    res.json(response.data);
+  } catch (error) {
+    console.error("Payment Error:", error.response?.data || error.message);
+    res.status(500).json({ error: "Payment failed" });
+  }
+});
+
+
+// ✅ Check Order Status
+exports.checkOrderStatus = AsyncAwaitError(async (req, res, next) => {
+  const { accessToken, merchantOrderId } = req.body;
+
+  try {
+    const response = await axios.get(
+      `https://api.phonepe.com/apis/pg/checkout/v2/order/${merchantOrderId}/status`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `O-Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const data = response.data;
+    console.log("response", response);
+    // 📝 Update transaction in DB
+    const data1 = await Payment.findOneAndUpdate(
+      { merchantOrderId },
+      {
+        paymentStatus: response.state,
+        transactionId: data.paymentDetails?.[0]?.transactionId || null,
+        paymentMode: data.paymentDetails?.[0]?.paymentMode || null,
+        utr: data.paymentDetails?.[0]?.rail?.utr || null,
+        rawResponse: JSON.stringify(data),
+      },
+      {
+        new: true,            // ✅ Updated doc return karega
+        runValidators: true,  // ✅ Schema validations run hongi
+      }
+    );
+
+    console.log("data1", data1);
+    res.json(data);
+  } catch (error) {
+    console.error("Status Check Error:", error.response?.data || error.message);
+    res.status(500).json({ error: "Status check failed" });
+  }
+});
+
+exports.transactions = async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    // filter condition
+    let matchStage = {};
+    if (userId) {
+      matchStage.userId = userId; // adminOrder ka userId filter
+    }
+
+    const transactions = await adminOrder.aggregate([
+      { $match: matchStage }, // filter lagao
+      {
+        $lookup: {
+          from: "payments", // payment collection ka naam (db me plural hota hai)
+          localField: "_id", // adminOrder ka _id
+          foreignField: "userId", // payment collection ka userId
+          as: "Payments", // result me array ke form me aa jayega
+        },
+      },
+      {
+        $sort: { createdAt: -1 },
+      },
+    ]);
+
+    res.json(transactions);
+  } catch (error) {
+    console.error("Transactions Error:", error.message);
+    res.status(500).json({ status: false, error: "Failed to fetch transactions" });
+  }
+};
+
+
+
+
+
+
+exports.deleteOrder = AsyncAwaitError(async (req, res, next) => {
+  const { id } = req.params; // yeh OrderId hoga frontend se
+
+  try {
+    // agar Payment me relation userId ke through hai
+    const deletedPayment = await Payment.findOneAndDelete({ userId: id });
+
+    // agar Order ko OrderId se delete karna hai
+    const deletedAdminOrder = await adminOrder.findByIdAndDelete(id);
+
+    if (!deletedPayment && !deletedAdminOrder) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    res.json({
+      message: "Order deleted successfully",
+      payment: deletedPayment,
+      order: deletedAdminOrder,
+    });
+  } catch (error) {
+    console.error("Delete Order Error:", error.message);
+    res.status(500).json({ error: "Failed to delete order" });
+  }
+});
