@@ -28,6 +28,8 @@ const order = require("./routes/orderRoute");
 const payment = require("./routes/paymentRoute");
 const contact = require("./routes/contactRoutes");
 const review = require("./routes/reviewRoutes");
+const booking = require("./routes/bookingRoutes");
+const complaint = require("./routes/complaintRoutes");
 
 
 
@@ -38,6 +40,8 @@ app.use("/api/v1", payment);
 app.use("/api/v1", require("./routes/Admin-OrderRoute"));
 app.use("/api/v1", contact);
 app.use("/api/v1", review);
+app.use("/api/v1", booking);
+app.use("/api/v1", complaint);
 
 
 module.exports = app;
